@@ -1,409 +1,308 @@
-### Debugged and Cleaned Streamlit Workout App
+# streamlit_app.py
 
 import streamlit as st
-import json
-import hashlib
-import os
-import time
-from datetime import datetime, timedelta
-import calendar
-import random
+import json, os, time, re
 import matplotlib.pyplot as plt
-import numpy as np
+from datetime import datetime
+import hashlib
 
-# ----------- Setup ---------- #
-st.set_page_config(page_title="Workout Optimizer", layout="centered")
+# ───── Page Configuration ─────
+st.set_page_config(
+    page_title="Workout Optimizer",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# ----------- Constants ---------- #
-training_split = ["chest_triceps", "back_biceps", "shoulders_abs", "legs", "rest"]
+# ───── Helpers ─────
 
-# ----------- Utilities ---------- #
-def save_json(filename, data):
-    with open(filename, "w") as f:
-        json.dump(data, f)
-
-def load_json(filename):
-    if os.path.exists(filename):
-        with open(filename, "r") as f:
+def load_json(path, default):
+    try:
+        with open(path, "r") as f:
             return json.load(f)
-    return {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
 
-# ----------- User Profile Management ---------- #
-def load_user_profile():
-    profiles = load_json("user_profiles.json")
-    profile_options = [f"{v['name']} ({k})" for k, v in profiles.items()]
-    profile_keys = list(profiles.keys())
-    selected_label = st.sidebar.selectbox("Select Profile", profile_options + ["+ Add New Profile"])
-    if selected_label == "+ Add New Profile":
-        selected_name = "+ Add New Profile"
-    else:
-        selected_index = profile_options.index(selected_label)
-        selected_name = profile_keys[selected_index]
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
-    if selected_name == "+ Add New Profile":
-        st.sidebar.subheader("Create New Profile")
-        email = st.sidebar.text_input("Email (used as login ID)", key="new_email")
-        password = st.sidebar.text_input("Password", type="password", key="new_password")
+def ensure_session_state():
+    for key, val in {
+        "auto_adjust": "none",
+        "settings": {},
+        "current_profile": None,
+        "profiles_list": []
+    }.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
+
+def hash_password(pw: str):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+def calculate_volume(weight, reps, sets):
+    return weight * reps * sets
+
+def get_auto_adjust_level(sleep, stress, soreness, rpe):
+    if rpe > 8 or stress > 7 or soreness > 6:
+        return "reduce"
+    elif sleep >= 8 and stress <= 4:
+        return "boost"
+    return "none"
+
+def themed_header(label, color="#e3f2fd", icon="🧠"):
+    st.markdown(f"""
+    <div style='background-color:{color};padding:8px;border-radius:8px;'>
+      <h4 style='margin:0;color:#1976d2'>{icon} {label}</h4>
+    </div>""", unsafe_allow_html=True)
+
+def start_rest_timer(seconds):
+    # real-time rest timer
+    with st.spinner(f"Resting for {seconds} seconds..."):
+        for sec in range(seconds, 0, -1):
+            st.write(f"⏱️ {sec}s remaining", end="\r")
+            time.sleep(1)
+        st.success("✅ Rest complete!")
+
+# ───── Data Paths ─────
+PROFILE_DIR = "profiles"
+LOGS_DIR    = "logs"
+STATS_PATH  = os.path.join(PROFILE_DIR, "muscle_stats.json")
+EX_DB_PATH  = "exercise_db.json"
+
+os.makedirs(PROFILE_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+# ───── Load / Save Profiles ─────
+
+def list_profiles():
+    return [fn[:-5] for fn in os.listdir(PROFILE_DIR) if fn.endswith(".json")]
+
+def load_profile(name):
+    path = os.path.join(PROFILE_DIR, f"{name}.json")
+    return load_json(path, None)
+
+def save_profile(name, data):
+    path = os.path.join(PROFILE_DIR, f"{name}.json")
+    save_json(path, data)
+
+# ───── Load Exercise Database ─────
+# (Make sure exercise_db.json contains the full expanded database)
+exercise_db = load_json(EX_DB_PATH, [])
+
+# ───── Profile UI ─────
+
+def render_profile_tab():
+    st.sidebar.header("👤 Profile")
+    profiles = list_profiles()
+    choice = st.sidebar.selectbox("Select profile", ["<New Profile>"] + profiles)
+    if choice == "<New Profile>":
         name = st.sidebar.text_input("Name", key="new_name")
-        age = st.sidebar.number_input("Age", min_value=10, max_value=100, step=1, key="new_age")
+        email = st.sidebar.text_input("Email", key="new_email")
+        password = st.sidebar.text_input("Password", type="password", key="new_pw")
+        age = st.sidebar.number_input("Age", min_value=10, max_value=100, key="new_age")
         height = st.sidebar.text_input("Height (e.g., 5'10)", key="new_height")
-        weight = st.sidebar.number_input("Weight (lbs)", min_value=50, max_value=400, key="new_weight")
-        goal = st.sidebar.selectbox("Goal", ["Strength", "Hypertrophy", "Endurance"], key="new_goal")
-        if st.sidebar.button("Create Profile") and name and height and email and password:
-            hashed_pw = hashlib.sha256(password.encode()).hexdigest()
-            profiles[email] = {"name": name, "email": email, "password": hashed_pw, "age": age, "height": height, "weight": weight, "goal": goal, }
-            save_json("user_profiles.json", profiles)
-            st.success("Profile created! Please reload the app.")
-            st.stop()
-        return {}
+        weight = st.sidebar.number_input("Weight (lbs)", min_value=50, max_value=500, key="new_weight")
+        gender = st.sidebar.selectbox("Gender", ["Male","Female","Other"], key="new_gender")
+        goal = st.sidebar.selectbox("Goal", ["Strength","Hypertrophy","Endurance","Recomposition"], key="new_goal")
+        equipment = st.sidebar.multiselect("Equipment Available",
+            ["Barbell","Dumbbell","Machine","Cable","Bodyweight","Free Weight"], key="new_eq")
+        if st.sidebar.button("Create Profile"):
+            # validate & save
+            try:
+                feet,inches = map(int,re.match(r"^(\d+)['’](\d+)$",height).groups())
+                height_in = feet*12+inches
+                prof = {
+                    "name": name, "email": email, "password": hash_password(password),
+                    "age": age, "height": height_in, "weight": weight,
+                    "gender": gender, "goal": goal,
+                    "equipment": equipment,
+                    "day_cycle": [],
+                    "settings": {"theme":"Light","coaching":True,"warmup":True},
+                    "custom_exercises": []
+                }
+                save_profile(name, prof)
+                st.sidebar.success(f"Profile '{name}' created.")
+                st.session_state.current_profile = name
+            except:
+                st.sidebar.error("Invalid height format.")
     else:
-        profile = profiles[selected_name]
-        login_pass = st.sidebar.text_input("Enter password to access profile", type="password", key="login_pass")
-        hashed_login = hashlib.sha256(login_pass.encode()).hexdigest()
-        if hashed_login != profile.get("password"):
-            st.error("Incorrect password. Access denied.")
-            if st.sidebar.button("Reset Password"):
-                new_pass = st.sidebar.text_input("Enter new password", type="password", key="reset_pass")
-                if new_pass:
-                    profile["password"] = hashlib.sha256(new_pass.encode()).hexdigest()
-                    profiles[selected_name] = profile
-                    save_json("user_profiles.json", profiles)
-                    st.success("Password reset successfully. Please re-enter.")
-                    st.stop()
+        prof = load_profile(choice)
+        # ask password
+        pw = st.sidebar.text_input("Password", type="password", key="load_pw")
+        if st.sidebar.button("Login"):
+            if prof and hash_password(pw)==prof["password"]:
+                st.session_state.current_profile = choice
+                st.session_state.settings = prof.get("settings",{})
+                st.sidebar.success(f"Welcome back, {prof['name']}!")
             else:
-                st.stop()
-        
-        st.session_state["current_profile_name"] = selected_name
-        return profile
+                st.sidebar.error("Invalid password.")
 
-def save_user_profile(profile):
-    profiles = load_json("user_profiles.json")
-    if "current_profile_name" in st.session_state:
-        profiles[st.session_state["current_profile_name"]] = profile
-        save_json("user_profiles.json", profiles)
-    save_json("user_profile.json", profile)
+# ───── “My Exercises” Tab ─────
 
-def profile_interface():
-    def delete_profile(name):
-        profiles = load_json("user_profiles.json")
-        if name in profiles:
-            del profiles[name]
-            save_json("user_profiles.json", profiles)
-            st.success(f"Deleted profile: {name}")
-            st.rerun()
+def render_my_exercises_tab(prof):
+    st.header("📝 My Custom Exercises")
+    col1,col2 = st.columns(2)
+    with col1:
+        themed_header("Add a New Exercise")
+        name = st.text_input("Name", key="ce_name")
+        muscle = st.selectbox("Muscle Group", ["Chest","Back","Shoulders","Biceps","Triceps","Legs","Abs"], key="ce_muscle")
+        sub = st.text_input("Sub-muscle", key="ce_sub")
+        typ = st.selectbox("Type", ["Compound","Isolation","Functional","Bodyweight"], key="ce_type")
+        lvl = st.selectbox("Level", ["Beginner","Intermediate","Advanced"], key="ce_lvl")
+        eqp = st.multiselect("Equipment", ["Barbell","Dumbbell","Machine","Cable","Bodyweight","Free Weight"], key="ce_eq")
+        vid = st.text_input("Video URL", key="ce_vid")
+        img = st.text_input("Image URL", key="ce_img")
+        desc= st.text_area("Description", key="ce_desc")
+        if st.button("Add Exercise"):
+            ce = {"name":name,"muscle":muscle,"submuscle":sub,
+                  "type":typ,"level":lvl,"equipment":eqp,
+                  "video_url":vid,"image_url":img,"description":desc}
+            prof["custom_exercises"].append(ce)
+            save_profile(st.session_state.current_profile, prof)
+            st.success("Added!")
+    with col2:
+        themed_header("Existing Custom Exercises")
+        exs = prof.get("custom_exercises",[])
+        for i,ex in enumerate(exs):
+            st.write(f"**{ex['name']}** ({ex['muscle']}–{ex['submuscle']})")
+            if st.button("Delete", key=f"del_{i}"):
+                exs.pop(i)
+                save_profile(st.session_state.current_profile, prof)
+                st.experimental_rerun()
 
-    def rename_profile(old_name, new_name):
-        profiles = load_json("user_profiles.json")
-        if old_name in profiles and new_name:
-            profiles[new_name] = profiles.pop(old_name)
-            save_json("user_profiles.json", profiles)
-            st.session_state["current_profile_name"] = new_name
-            st.success(f"Renamed profile: {old_name} ➜ {new_name}")
-            st.rerun()
-    st.session_state.clear()
+# ───── Workout Tab ─────
 
-    st.sidebar.title("👤 User Profile")
-    profiles = load_json("user_profiles.json")
-    if "current_profile_name" in st.session_state:
-        current_name = st.session_state["current_profile_name"]
-        with st.sidebar.expander(f"Manage Profile: {current_name}"):
-            new_name = st.text_input("Rename profile", value=current_name)
-            if st.button("Rename Profile"):
-                rename_profile(current_name, new_name)
-            if st.button("Delete Profile"):
-                delete_profile(current_name)
-    profile = load_user_profile()
-    if not profile:
-        st.sidebar.subheader("Set Up Your Profile")
-        name = st.sidebar.text_input("Name")
-        age = st.sidebar.number_input("Age", min_value=10, max_value=100, step=1)
-        height = st.sidebar.text_input("Height (e.g., 5'10)")
-        weight = st.sidebar.number_input("Weight (lbs)", min_value=50, max_value=400)
-        goal = st.sidebar.selectbox("Goal", ["Strength", "Hypertrophy", "Endurance"])
-        if st.sidebar.button("Save Profile") and name and height:
-            profile = {"name": name, "age": age, "height": height, "weight": weight, "goal": goal, "day_counter": 0}
-            save_user_profile(profile)
-            st.success("Profile saved! Please reload the app.")
-            st.stop()
-    else:
-        st.sidebar.markdown(f"**Name:** {profile['name']}")
-        st.sidebar.markdown(f"**Age:** {profile['age']}")
-        st.sidebar.markdown(f"**Height:** {profile['height']}")
-        st.sidebar.markdown(f"**Weight:** {profile['weight']} lbs")
-        st.sidebar.markdown(f"**Goal:** {profile['goal']}")
-    return profile
+def render_workout_tab(prof):
+    st.header("🏋️ Today's Workout")
+    # readiness
+    themed_header("🧠 Daily Readiness Check")
+    with st.expander("Rate your readiness"):
+        sleep = st.slider("Sleep Quality (1–10)",1,10,7)
+        stress= st.slider("Stress Level  (1–10)",1,10,4)
+        sore = st.slider("Soreness Level(1–10)",1,10,3)
+        rpe  = st.slider("RPE (1–10)",        1,10,6)
+        st.session_state.auto_adjust = get_auto_adjust_level(sleep,stress,sore,rpe)
+        if st.session_state.auto_adjust=="reduce":
+            st.warning("⚠️ Scale down intensity today.")
+        elif st.session_state.auto_adjust=="boost":
+            st.success("✅ Great recovery — you can push a bit harder.")
 
-# ----------- Cycle Tagging ---------- #
-def get_cycle_tags():
-    return load_json("cycle_tags.json")
+    # merge built-in + custom
+    all_ex = exercise_db + prof.get("custom_exercises",[])
+    # filter by equipment
+    all_ex = [e for e in all_ex if set(e["equipment"]) & set(prof["equipment"])]
+    # plan logic: rotate through muscle groups by least-worked submuscle
+    # (for brevity, we pick a random sample)
+    import random
+    todays = random.sample(all_ex, k=min(6,len(all_ex)))
+    # display
+    for ex in todays:
+        with st.expander(f"**{ex['name']}**  [{ex['type']}]"):
+            st.markdown(f"*Muscle:* {ex['muscle']} – {ex['submuscle']}  |  *Lvl:* {ex['level']}  |  *Equip:* {', '.join(ex['equipment'])}")
+            st.write(ex["description"])
+            if ex.get("video_url"):
+                st.video(ex["video_url"])
+            if ex.get("image_url"):
+                st.image(ex["image_url"], width=300)
+            # logging inputs
+            sets = prof["settings"].get("warmup") and 5 or 4
+            reps = {"Strength":5,"Hypertrophy":10,"Endurance":15,"Recomposition":8}[prof["goal"]]
+            suggested = prof["exercise_weights"].get(ex["name"], 10.0)
+            st.write(f"**Plan:** {sets} × {reps} @ {suggested} lbs")
+            wt = st.number_input("Weight used (lbs)", value=suggested, key=f"wt_{ex['name']}")
+            total_vol = 0
+            actual_reps=[]
+            for s in range(1,sets+1):
+                r = st.number_input(f"Reps in set {s}", min_value=0, max_value=reps*2, key=f"r_{ex['name']}_{s}")
+                actual_reps.append(r)
+                total_vol += calculate_volume(wt,r,1)
+                # rest
+                if s<sets and st.button(f"Start rest for {prof['settings'].get('rest_interval',60)}s", key=f"rest_{ex['name']}_{s}"):
+                    start_rest_timer(prof['settings'].get('rest_interval',60))
+            # save log
+            if st.button("Save Exercise Log", key=f"log_{ex['name']}"):
+                log = load_json(os.path.join(LOGS_DIR,f"{prof['name']}_logs.json"),[])
+                entry = {"date":datetime.now().isoformat(),"exercise":ex["name"],
+                         "weight":wt,"reps":actual_reps,"volume":total_vol,
+                         "adjust":st.session_state.auto_adjust}
+                log.append(entry)
+                save_json(os.path.join(LOGS_DIR,f"{prof['name']}_logs.json"), log)
+                # update progression
+                prof["exercise_weights"][ex["name"]] = suggested * (1+ (0.05 if prof["goal"]=="Strength" else 0.025 if prof["goal"]=="Hypertrophy" else 0.01))
+                save_profile(prof["name"],prof)
+                st.success("Logged!")
+            st.write(f"**Volume:** {total_vol:.1f} lbs")
 
-def save_cycle_tag(date_key, name):
-    tags = get_cycle_tags()
-    tags[date_key] = name
-    save_json("cycle_tags.json", tags)
+# ───── Progress Tab ─────
 
-def auto_tag_cycle(stats):
-    total_volume = sum(stats.values())
-    if total_volume > 1000:
-        return "High Volume Week"
-    elif total_volume > 500:
-        return "Moderate Volume"
-    elif total_volume > 0:
-        return "Light Activity"
-    else:
-        return "Rest Week"
-
-# ----------- Muscle Tracking and Logging ---------- #
-def save_cumulative_stats():
-    save_json("muscle_stats.json", muscle_hit_tracker)
-
-muscle_hit_tracker = {}
-
-def update_muscles_hit(exercise_list):
-    for exercise in exercise_list:
-        for muscle in muscle_map.get(exercise, []):
-            muscle_hit_tracker[muscle] = muscle_hit_tracker.get(muscle, 0) + 1
-
-def reset_muscle_tracker():
-    global muscle_hit_tracker
-    muscle_hit_tracker = {}
-
-def get_muscles_least_hit(exercise_group):
-    muscle_scores = {}
-    for exercise in exercise_group:
-        name = exercise[0]
-        muscles = muscle_map.get(name, [])
-        total_score = sum(muscle_hit_tracker.get(m, 0) for m in muscles)
-        muscle_scores[name] = total_score
-    sorted_exercises = sorted(exercise_group, key=lambda ex: muscle_scores[ex[0]])
-    return sorted_exercises
-
-def select_exercises_with_focus(split, k=5):
-    pool = exercise_pool.get(split, [])
-    focused = get_muscles_least_hit(pool)
-    chosen = focused[:k]
-    update_muscles_hit([ex[0] for ex in chosen])
-    return chosen
-
-def show_rest_timer(seconds=60, key=None):
-    if st.button("Start Rest Timer", key=key):
-        with st.empty():
-            for remaining in range(seconds, 0, -1):
-                st.markdown(f"⏳ Rest: {remaining} seconds remaining")
-                time.sleep(1)
-            st.success("Rest complete!")
-
-# ----------- Visualization ---------- #
-def radar_chart(data):
-    labels = list(data.keys())
-    stats = list(data.values())
-    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
-    stats += stats[:1]
-    angles += angles[:1]
-    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
-    ax.plot(angles, stats, color='blue', linewidth=2)
-    ax.fill(angles, stats, color='skyblue', alpha=0.4)
-    ax.set_yticklabels([])
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(labels, fontsize=10)
+def render_progress_tab(prof):
+    st.header("📈 Progress & Stats")
+    logs = load_json(os.path.join(LOGS_DIR,f"{prof['name']}_logs.json"), [])
+    if not logs:
+        st.info("No logs yet.")
+        return
+    # DataFrame
+    import pandas as pd
+    df = pd.DataFrame(logs)
+    # summary charts
+    st.subheader("Total Volume by Muscle")
+    vol_by_ex = df.groupby("exercise")["volume"].sum()
+    fig,ax = plt.subplots()
+    vol_by_ex.plot.bar(ax=ax)
     st.pyplot(fig)
 
-# ----------- Placeholder for Exercises & Muscles ---------- #
-exercise_pool = {
-    "chest_triceps": [
-        ("Incline Barbell Press", 4, 10, 135),
-        ("Flat Bench Press", 4, 10, 155),
-        ("Decline Dumbbell Press", 4, 10, 50),
-        ("Cable Crossover (High to Low)", 3, 15, 25),
-        ("Dumbbell Flys", 3, 12, 30),
-        ("Overhead Dumbbell Extension", 3, 12, 40),
-        ("Skull Crushers", 3, 10, 40),
-        ("Triceps Pushdown (Rope)", 3, 15, 30),
-        ("Close-Grip Bench Press", 4, 8, 135),
-        ("Dips (Weighted)", 3, 10, 20)
-    ],
-    "back_biceps": [
-        ("Pull-ups", 3, 10, "Bodyweight"),
-        ("Barbell Row", 4, 10, 135),
-        ("Lat Pulldown (Wide)", 4, 12, 110),
-        ("Seated Cable Row", 4, 10, 100),
-        ("Deadlift", 3, 5, 225),
-        ("Incline Dumbbell Curl", 3, 10, 30),
-        ("Concentration Curl", 3, 10, 25),
-        ("EZ Bar Curl", 3, 10, 50),
-        ("Hammer Curl", 3, 12, 35),
-        ("Preacher Curl", 3, 12, 45)
-    ],
-    "shoulders_abs": [
-        ("Overhead Press", 4, 8, 95),
-        ("Lateral Raises", 3, 15, 20),
-        ("Rear Delt Fly", 3, 15, 20),
-        ("Front Raises", 3, 12, 20),
-        ("Arnold Press", 4, 10, 40),
-        ("Hanging Leg Raises", 3, 15, "Bodyweight"),
-        ("Russian Twists", 3, 20, "Bodyweight"),
-        ("Cable Crunches", 3, 15, 50),
-        ("Plank", 3, 60, "Seconds"),
-        ("Bicycle Crunches", 3, 20, "Bodyweight")
-    ],
-    "legs": [
-        ("Barbell Back Squat", 4, 10, 185),
-        ("Romanian Deadlift", 4, 10, 135),
-        ("Walking Lunges", 3, 12, 25),
-        ("Leg Press", 4, 12, 200),
-        ("Step-Ups", 3, 12, 30),
-        ("Leg Extension", 3, 15, 80),
-        ("Hamstring Curl", 3, 15, 70),
-        ("Glute Bridges", 3, 15, 60),
-        ("Seated Calf Raise", 3, 20, 90),
-        ("Standing Calf Raise", 3, 20, 100)
-    ]
-}
+    st.subheader("Adjustment Trends (Last 7 Sessions)")
+    recent = df.tail(7)
+    adj = recent["adjust"].value_counts().reindex(["reduce","none","boost"],fill_value=0)
+    fig2,ax2 = plt.subplots()
+    adj.plot.bar(color=["orange","gray","green"],ax=ax2)
+    st.pyplot(fig2)
 
-muscle_map = {
-    "Incline Barbell Press": ["Chest_Upper"],
-    "Flat Bench Press": ["Chest_Mid"],
-    "Decline Dumbbell Press": ["Chest_Lower"],
-    "Cable Crossover (High to Low)": ["Chest_Lower"],
-    "Dumbbell Flys": ["Chest_Inner"],
-    "Overhead Dumbbell Extension": ["Triceps_Long"],
-    "Skull Crushers": ["Triceps_Long"],
-    "Triceps Pushdown (Rope)": ["Triceps_Lateral"],
-    "Close-Grip Bench Press": ["Triceps_Medial"],
-    "Dips (Weighted)": ["Chest_Lower", "Triceps_Medial"],
-    "Pull-ups": ["Back_Upper"],
-    "Barbell Row": ["Back_Mid"],
-    "Lat Pulldown (Wide)": ["Back_Upper"],
-    "Seated Cable Row": ["Back_Mid"],
-    "Deadlift": ["Back_Lower"],
-    "Incline Dumbbell Curl": ["Biceps_Long"],
-    "Concentration Curl": ["Biceps_Short"],
-    "EZ Bar Curl": ["Biceps_Short"],
-    "Hammer Curl": ["Biceps_Brachialis"],
-    "Preacher Curl": ["Biceps_Short"],
-    "Overhead Press": ["Shoulder_Anterior"],
-    "Lateral Raises": ["Shoulder_Lateral"],
-    "Rear Delt Fly": ["Shoulder_Posterior"],
-    "Front Raises": ["Shoulder_Anterior"],
-    "Arnold Press": ["Shoulder_Anterior", "Shoulder_Lateral"],
-    "Hanging Leg Raises": ["Abs_Lower"],
-    "Russian Twists": ["Abs_Obliques"],
-    "Cable Crunches": ["Abs_Upper"],
-    "Plank": ["Abs_Core"],
-    "Bicycle Crunches": ["Abs_Obliques"],
-    "Barbell Back Squat": ["Quads", "Glutes"],
-    "Romanian Deadlift": ["Hamstrings", "Glutes"],
-    "Walking Lunges": ["Quads", "Glutes"],
-    "Leg Press": ["Quads"],
-    "Step-Ups": ["Quads"],
-    "Leg Extension": ["Quads"],
-    "Hamstring Curl": ["Hamstrings"],
-    "Glute Bridges": ["Glutes"],
-    "Seated Calf Raise": ["Calves"],
-    "Standing Calf Raise": ["Calves"]
-}
+    st.subheader("Exercise Trends")
+    ex_choice = st.selectbox("Select exercise", vol_by_ex.index)
+    sub = df[df["exercise"]==ex_choice]
+    fig3,ax3=plt.subplots()
+    ax3.plot(pd.to_datetime(sub["date"]).dt.date, sub["weight"], marker="o")
+    ax3.set_title(f"{ex_choice} Weight Over Time")
+    st.pyplot(fig3)
 
-# ----------- Daily Logging ---------- #
-def log_daily_workout(profile):
-    today_split = st.selectbox("Choose today's workout split", training_split)
-    st.header(f"Today's Split: {today_split.replace('_', ' ').title()}")
+# ───── Cycle Planner Tab ─────
 
-    if today_split == "rest":
-        st.info("Today is a rest day. Get some good recovery!")
-        return
+def render_cycle_planner_tab(prof):
+    st.header("📆 Cycle Planner")
+    st.info("Under development: design multi-week phases, deload weeks, progression schemes.")
 
-    exercises = select_exercises_with_focus(today_split)
-    st.markdown("### 🏋️‍♂️ Today's Exercises")
-    for i, (name, sets, reps, weight) in enumerate(exercises):
-        st.markdown(f"**{i+1}. {name}** — {sets} sets x {reps} reps @ {weight} lbs")
+# ───── Settings Tab ─────
 
-    if st.button("Start Workout"):
-        session_log = {}
-        st.markdown("---")
-        st.subheader("📝 Log Workout Performance")
-        for name, sets, reps, weight in exercises:
-            used_weight = st.text_input(f"Actual weight used for {name}", value=str(weight), key=f"w_{name}")
-            set_data = []
-            for s in range(1, sets+1):
-                reps_done = st.number_input(f"{name} - Set {s} reps", 0, 100, value=reps, key=f"{name}_set{s}")
-                set_data.append({"set": s, "reps": reps_done})
-                show_rest_timer(30, key=f"rest_timer_{name}_set{s}")
-            session_log[name] = {"weight": used_weight, "sets": set_data}
+def render_settings_tab(prof):
+    st.header("⚙️ Settings")
+    s = prof["settings"]
+    s["theme"] = st.selectbox("Theme", ["Light","Dark","Minimal"], index=["Light","Dark","Minimal"].index(s.get("theme","Light")))
+    s["coaching"] = st.checkbox("Show AI tips", value=s.get("coaching",True))
+    s["warmup"]   = st.checkbox("Include Warm-up Sets", value=s.get("warmup",True))
+    s["rest_interval"] = st.slider("Default Rest (s)", 30,180,s.get("rest_interval",60))
+    if st.button("Save Settings"):
+        prof["settings"] = s
+        save_profile(prof["name"],prof)
+        st.success("Settings saved.")
 
-        if st.button("Finish and Save Workout"):
-            date_str = datetime.today().strftime("%Y%m%d")
-            save_json(f"logs_{date_str}.json", session_log)
-            save_user_profile(profile)
-            save_cumulative_stats()
-            st.success("Workout saved! Great job today 💪")
-            st.rerun()
+# ───── Main ─────
 
-# ----------- Stats Display ---------- #
-def display_cumulative_muscle_stats():
-    st.markdown("### 📊 Cumulative Muscle Stats")
-    stats = load_json("muscle_stats.json")
-    if not stats:
-        st.info("No muscle data yet.")
-        return
-    muscle_group_filter = st.multiselect(
-        "Filter by muscle group",
-        sorted(set(m.split('_')[0] for m in stats)),
-        default=[]
-    )
-    filtered = {k.replace('_', ' '): v for k, v in stats.items() if not muscle_group_filter or k.split('_')[0] in muscle_group_filter}
-    if filtered:
-        st.bar_chart(filtered)
-        st.markdown("#### Radar View of Muscle Engagement")
-        radar_chart(filtered)
-    else:
-        st.info("No data matches the selected filter.")
-    st.markdown("---")
-    st.markdown("### 📆 Tag This Cycle")
-    cycle_name = st.text_input("Name this training cycle")
-    if st.button("Save Cycle Tag") or not cycle_name.strip():
-        if not cycle_name.strip():
-            cycle_name = auto_tag_cycle(stats)
-        save_cycle_tag(datetime.today().strftime("%Y%m%d"), cycle_name)
-        st.success(f"Cycle '{cycle_name}' saved!")
+ensure_session_state()
+render_profile_tab()
 
-# ----------- Summaries ---------- #
-def summarize_logs_by_period(days):
-    summary = {}
-    today = datetime.today()
-    for file in os.listdir():
-        if file.startswith("logs_") and file.endswith(".json"):
-            date_str = file[5:13]
-            try:
-                date_obj = datetime.strptime(date_str, "%Y%m%d")
-            except ValueError:
-                continue
-            if (today - date_obj).days <= days:
-                with open(file, "r") as f:
-                    data = json.load(f)
-                for ex, ex_data in data.items():
-                    for set_entry in ex_data["sets"]:
-                        for muscle in muscle_map.get(ex, []):
-                            summary[muscle] = summary.get(muscle, 0) + set_entry["reps"]
-    return summary
-
-def display_week_month_summary():
-    st.markdown("---")
-    st.markdown("### 🗓️ Weekly & Monthly Muscle Summary")
-    st.markdown("#### Weekly Summary")
-    week_summary = summarize_logs_by_period(7)
-    if week_summary:
-        st.bar_chart({k.replace('_', ' '): v for k, v in week_summary.items()})
-    else:
-        st.info("No data for this week.")
-    st.markdown("#### Monthly Summary")
-    month_summary = summarize_logs_by_period(30)
-    if month_summary:
-        st.bar_chart({k.replace('_', ' '): v for k, v in month_summary.items()})
-    else:
-        st.info("No data for this month.")
-
-# ----------- Run App ---------- #
-profile = profile_interface()
-log_daily_workout(profile)
-display_cumulative_muscle_stats()
-display_week_month_summary()
+if st.session_state.current_profile:
+    prof = load_profile(st.session_state.current_profile)
+    tabs = st.tabs(["Profile","My Exercises","Workout","Progress","Cycle Planner","Settings"])
+    with tabs[0]:
+        st.write(f"**Name:** {prof['name']}  |  **Goal:** {prof['goal']}  |  **Equipment:** {', '.join(prof['equipment'])}")
+    with tabs[1]:
+        render_my_exercises_tab(prof)
+    with tabs[2]:
+        render_workout_tab(prof)
+    with tabs[3]:
+        render_progress_tab(prof)
+    with tabs[4]:
+        render_cycle_planner_tab(prof)
+    with tabs[5]:
+        render_settings_tab(prof)
