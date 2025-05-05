@@ -2,6 +2,7 @@
 
 import streamlit as st
 import json
+import hashlib
 import os
 import time
 from datetime import datetime, timedelta
@@ -30,27 +31,48 @@ def load_json(filename):
 # ----------- User Profile Management ---------- #
 def load_user_profile():
     profiles = load_json("user_profiles.json")
-    selected_name = st.sidebar.selectbox("Select Profile", list(profiles.keys()) + ["+ Add New Profile"])
+    profile_options = [f"{v['name']} ({k})" for k, v in profiles.items()]
+    profile_keys = list(profiles.keys())
+    selected_label = st.sidebar.selectbox("Select Profile", profile_options + ["+ Add New Profile"])
+    if selected_label == "+ Add New Profile":
+        selected_name = "+ Add New Profile"
+    else:
+        selected_index = profile_options.index(selected_label)
+        selected_name = profile_keys[selected_index]
 
     if selected_name == "+ Add New Profile":
         st.sidebar.subheader("Create New Profile")
-        name = st.sidebar.text_input("Name")
+        email = st.sidebar.text_input("Email (used as login ID)", key="new_email")
+        password = st.sidebar.text_input("Password", type="password", key="new_password")
+        name = st.sidebar.text_input("Name", key="new_name")
         age = st.sidebar.number_input("Age", min_value=10, max_value=100, step=1, key="new_age")
         height = st.sidebar.text_input("Height (e.g., 5'10)", key="new_height")
         weight = st.sidebar.number_input("Weight (lbs)", min_value=50, max_value=400, key="new_weight")
         goal = st.sidebar.selectbox("Goal", ["Strength", "Hypertrophy", "Endurance"], key="new_goal")
-        if st.sidebar.button("Create Profile") and name and height:
-            profiles[name] = {"name": name, "age": age, "height": height, "weight": weight, "goal": goal, "day_counter": 0}
+        if st.sidebar.button("Create Profile") and name and height and email and password:
+            hashed_pw = hashlib.sha256(password.encode()).hexdigest()
+            profiles[email] = {"name": name, "email": email, "password": hashed_pw, "age": age, "height": height, "weight": weight, "goal": goal, }
             save_json("user_profiles.json", profiles)
             st.success("Profile created! Please reload the app.")
             st.stop()
         return {}
     else:
         profile = profiles[selected_name]
-        if 'day_counter' not in profile:
-            profile['day_counter'] = 0
-            profiles[selected_name] = profile
-            save_json("user_profiles.json", profiles)
+        login_pass = st.sidebar.text_input("Enter password to access profile", type="password", key="login_pass")
+        hashed_login = hashlib.sha256(login_pass.encode()).hexdigest()
+        if hashed_login != profile.get("password"):
+            st.error("Incorrect password. Access denied.")
+            if st.sidebar.button("Reset Password"):
+                new_pass = st.sidebar.text_input("Enter new password", type="password", key="reset_pass")
+                if new_pass:
+                    profile["password"] = hashlib.sha256(new_pass.encode()).hexdigest()
+                    profiles[selected_name] = profile
+                    save_json("user_profiles.json", profiles)
+                    st.success("Password reset successfully. Please re-enter.")
+                    st.stop()
+            else:
+                st.stop()
+        
         st.session_state["current_profile_name"] = selected_name
         return profile
 
@@ -283,8 +305,7 @@ muscle_map = {
 
 # ----------- Daily Logging ---------- #
 def log_daily_workout(profile):
-    today_index = profile['day_counter'] % len(training_split)
-    today_split = training_split[today_index]
+    today_split = st.selectbox("Choose today's workout split", training_split)
     st.header(f"Today's Split: {today_split.replace('_', ' ').title()}")
 
     if today_split == "rest":
@@ -312,7 +333,6 @@ def log_daily_workout(profile):
         if st.button("Finish and Save Workout"):
             date_str = datetime.today().strftime("%Y%m%d")
             save_json(f"logs_{date_str}.json", session_log)
-            profile['day_counter'] += 1
             save_user_profile(profile)
             save_cumulative_stats()
             st.success("Workout saved! Great job today 💪")
